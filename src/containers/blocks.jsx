@@ -7,6 +7,7 @@ import VMScratchBlocks from '../lib/blocks';
 import VM from 'scratch-vm';
 import Prompt from './prompt.jsx';
 import BlocksComponent from '../components/blocks/blocks.jsx';
+import Peer from 'peerjs';
 
 const addFunctionListener = (object, property, callback) => {
     const oldFn = object[property];
@@ -23,6 +24,7 @@ class Blocks extends React.Component {
         this.ScratchBlocks = VMScratchBlocks(props.vm);
         bindAll(this, [
             'attachVM',
+            'syncWorkspace',
             'detachVM',
             'handlePromptStart',
             'handlePromptCallback',
@@ -91,6 +93,109 @@ class Blocks extends React.Component {
         this.props.vm.addListener('VISUAL_REPORT', this.onVisualReport);
         this.props.vm.addListener('workspaceUpdate', this.onWorkspaceUpdate);
         this.props.vm.addListener('targetsUpdate', this.onTargetsUpdate);
+
+        {
+            // uuidv4 source: StackOverflow @author: broofa: https://stackoverflow.com/a/2117523
+            function uuidv4() {
+
+                return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
+                (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)
+                );
+            }
+            // end uuidv4
+
+            // Parse Url for a remote connection string
+            function getUUIDFromUrl() {
+
+                var pos = location.href.indexOf("?");
+                if (pos === -1) return undefined;
+                else {
+                    var uuid_remote = undefined;
+                    location.href.substr(pos+1).split("&").forEach(function(pair) {
+                    
+                    var key = pair.substr(0, pair.indexOf("="));
+                    var val = pair.substr(pair.indexOf("=")+1);
+
+                    console.log("key: " + key + " val: " + val);
+
+                    if (key === "uuid") uuid_remote = val;
+                    });
+                    return uuid_remote;
+                }
+            }
+
+            var uuid_remote = getUUIDFromUrl(); 
+
+            // Generate our uuid and update url with it.
+            this.uuid = uuidv4();
+            this.peers = [];
+            console.log("peers: " + this.peers);
+            window.history.replaceState("", "", "?uuid=" + this.uuid)
+
+            // Start connection and listening receivers for peer-to-peer connections with clients.
+            // Basic workplace syncing.
+            this.peer = new Peer(this.uuid, {host: '45.55.148.206', port: 9000, path: ''});
+
+            this.peer.on('open', function(id) {
+
+                console.log("Connected with Server: id: " + id);
+            });
+
+            (function(parent) {
+
+                parent.peer.on('connection', function(conn) {
+
+                    (function(parent) {
+
+                        conn.on('data', function(data){
+
+                            console.log("Received peer data: " + data);
+                            //TODO: this is broken endless loop between peers updating gui (need to add some checking)
+                            //parent.ScratchBlocks.Events.fromJson(data, parent.workspace).run(true);
+                        });
+                    })(parent);
+                    
+                    if (!parent.peers.includes(conn.peer)) parent.peers.push(parent.peer.connect(conn.peer));
+                });
+            })(this);
+
+            if (uuid_remote !== undefined) {
+
+                if (!this.peers.includes(uuid_remote)) {
+                    
+                    var conn = this.peer.connect(uuid_remote);
+
+                    (function(parent) {
+                        
+                        conn.on('data', function(data) {
+
+                            console.log("Received peer data: " + data);
+                            //TODO: this is broken endless loop between peers updating gui (need to add some checking)
+                            //parent.ScratchBlocks.Events.fromJson(data, parent.workspace).run(true);
+                        });
+                    })(this);
+
+                    this.peers.push(conn);
+                }
+            }
+
+            this.workspace.addChangeListener(this.syncWorkspace)
+        }
+        
+    }
+    syncWorkspace(event) {
+        //if (event.type == Blockly.Events.UI) { //TODO: don't have access to this variable Events.UI?
+        if (event.type == this.ScratchBlocks.Events.UI) {
+            return;  // Don't mirror UI events.
+        }
+
+        var json = event.toJson();
+        console.log(json);
+
+        this.peers.forEach(function(conn) {
+
+            conn.send(json);
+        });
     }
     detachVM () {
         this.props.vm.removeListener('SCRIPT_GLOW_ON', this.onScriptGlowOn);
@@ -115,7 +220,7 @@ class Blocks extends React.Component {
             ['glide', 'move', 'set'].forEach(prefix => {
                 this.updateToolboxBlockValue(`${prefix}x`, this.props.vm.editingTarget.x.toFixed(0));
                 this.updateToolboxBlockValue(`${prefix}y`, this.props.vm.editingTarget.y.toFixed(0));
-            });
+	    });
         }
     }
     onWorkspaceMetricsChange () {
@@ -176,6 +281,7 @@ class Blocks extends React.Component {
     handlePromptCallback (data) {
         this.state.prompt.callback(data);
         this.handlePromptClose();
+        console.log("onTargetUpdate");
     }
     handlePromptClose () {
         this.setState({prompt: null});
